@@ -2,31 +2,26 @@ import os
 import requests
 from dotenv import load_dotenv
 
+def send_get_request(url: str):
+    try:
+        # Make the GET request
+        response = requests.get(url, headers=HEADERS)
+        response.raise_for_status()  # Raise an error for bad HTTP responses (4xx or 5xx)
+        data = response.json()  # Parse the JSON response
+        print("Response:", data)
+        return data
+    except requests.exceptions.RequestException as e:
+        print("Error:", e)
+        return -1
+
 def get_meter_connections():
     url = f"{BASE_URL}"
-    try:
-        # Make the GET request
-        response = requests.get(url, headers=HEADERS)
-        response.raise_for_status()  # Raise an error for bad HTTP responses (4xx or 5xx)
-        data = response.json()  # Parse the JSON response
-        print("Connections:", data)
-        return data
-    except requests.exceptions.RequestException as e:
-        print("Error:", e)
-        return None
+    return send_get_request(url=url)
 
-def get_meter_readings(meter_id: str, date: str):
+def get_meter_readings_per_day(meter_id: str, date: str):
     url = f"{BASE_URL}/{meter_id}/usage/{date}"
-    try:
-        # Make the GET request
-        response = requests.get(url, headers=HEADERS)
-        response.raise_for_status()  # Raise an error for bad HTTP responses (4xx or 5xx)
-        data = response.json()  # Parse the JSON response
-        print("Meter Readings:", data)
-        return data
-    except requests.exceptions.RequestException as e:
-        print("Error:", e)
-        return None
+    return send_get_request(url=url)
+
 
 if __name__ == '__main__':
 
@@ -45,4 +40,4 @@ if __name__ == '__main__':
 
     # Call the function to fetch meter readings
     meters_data = get_meter_connections()
-    
+
