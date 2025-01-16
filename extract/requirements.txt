@@ -1,2 +1,7 @@
 requests
 python-dotenv
+dlt[postgres]>=1.5.0
+dlt[duckdb]>=1.5.0
+numpy
+pandas
+streamlit

@@ -1,0 +1,54 @@
+version: 1
+tables:
+  meters:
+    description: "Stores meter details and their connection to addresses."
+    columns:
+      meter_identifier:
+        data_type: varchar
+        nullable: false
+        primary_key: true
+      connection_type:
+        data_type: varchar
+        nullable: false
+      start_date:
+        data_type: date
+        nullable: false
+      end_date:
+        data_type: date
+        nullable: true
+
+  usage_entries:
+    description: "Stores usage data collected from meters."
+    columns:
+      usage_id:
+        data_type: int
+        nullable: false
+        primary_key: true
+        generated: "identity"
+      meter_identifier:
+        data_type: varchar
+        nullable: false
+        foreign_key: "meters(meter_identifier)"
+      time:
+        data_type: timestamptz
+        nullable: false
+      reading_time_type:
+        data_type: varchar
+        nullable: true
+        description: "low or high for electricity"
+      reading_subtype:
+        data_type: varchar
+        nullable: true
+        description: "Subtype: e.g., delivery or return"
+      value:
+        data_type: decimal
+        nullable: true
+        description: "Value of the specific reading (e.g., 0.78)"
+      cumulative_reading:
+        data_type: decimal
+        nullable: true
+        description: "Cumulative reading (e.g., 16,196.41), nullable"
+      temperature:
+        data_type: decimal
+        nullable: true
+        description: "Temperature in Celsius at the time of the reading, nullable"

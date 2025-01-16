@@ -20,7 +20,7 @@ to the apartment.
   - sunshine/cloudiness (future extension for solar panels)
 
 ### 1.2 Extract
-- electricity and gas usage
+- electricity, gas usage and temperature via slimmemeterportal.nl API
 
 
 
