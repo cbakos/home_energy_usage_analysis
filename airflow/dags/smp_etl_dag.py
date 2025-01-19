@@ -1,4 +1,6 @@
 import datetime
+from typing import Dict
+
 import pendulum
 import os
 
@@ -16,20 +18,20 @@ DAG_ID = "postgres_operator_dag"
 
 
 @dag(
-    dag_id="smp_etl_dag_v03",
+    dag_id="smp_etl_dag_v06",
     schedule_interval="@daily",
     start_date=pendulum.datetime(2025, 1, 17, tz="UTC"),
     catchup=False,
     dagrun_timeout=datetime.timedelta(minutes=60),
 )
 def etl_smp_data():
-    create_smp_energy_usage_tables = SQLExecuteQueryOperator(
+    create_smp_energy_usage_tables_task = SQLExecuteQueryOperator(
         task_id="create_smp_energy_usage_tables",
         sql="sql/create_smp_energy_usage_tables.sql",
-        conn_id="smp_pg_conn"
+        conn_id="home_energy_pg_conn"
     )
 
-    @task()
+    @task(task_id="get_meter_connections")
     def get_meter_connections():
         # Use HttpHook to interact with the connection
         http_hook = HttpHook(http_conn_id='smp_api_conn', method='GET')
@@ -38,10 +40,18 @@ def etl_smp_data():
         # Process and log the response
         response_data = response.json()
         print(f"Meter connections: {response_data}")
-        return response_data  # Pass data to the next task if needed
+        return response_data[0]  # Pass data to the next task if needed
+
+    @task()
+    def load_meter_connections_to_pg(data: Dict):
+        hook = PostgresHook(postgres_conn_id='home_energy_pg_conn')
+
+        hook.run(sql="sql/insert_smp_meter_connections.sql", parameters=data)
 
 
-    create_smp_energy_usage_tables >> get_meter_connections()
+    create_smp_energy_usage_tables_task >> get_meter_connections()
+    meter_data = get_meter_connections()
+    load_meter_connections_to_pg(data=meter_data)
 
 
 dag = etl_smp_data()
