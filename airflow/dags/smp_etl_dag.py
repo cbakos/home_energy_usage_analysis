@@ -13,12 +13,9 @@ from airflow.providers.postgres.hooks.postgres import PostgresHook
 
 from tempfile import NamedTemporaryFile
 
-ENV_ID = os.environ.get("SYSTEM_TESTS_ENV_ID")
-DAG_ID = "postgres_operator_dag"
-
 
 @dag(
-    dag_id="smp_etl_dag_v11",
+    dag_id="smp_etl_dag_v13",
     schedule_interval="@daily",
     start_date=pendulum.datetime(2025, 1, 17, tz="UTC"),
     catchup=False,
@@ -41,7 +38,7 @@ def etl_smp_data():
         response_data = response.json()
         print(f"Meter connections received from API: {response_data}")
 
-        insert_query = """
+        upsert_query = """
             INSERT INTO meters (meter_identifier, connection_type, start_date, end_date)
             VALUES (%s, %s, to_date(%s, 'DD-MM-YYYY'), to_date(%s, 'DD-MM-YYYY'))
             ON CONFLICT (meter_identifier)
@@ -68,7 +65,7 @@ def etl_smp_data():
             ]
 
             # Execute the query for all records in the list
-            cursor.executemany(insert_query, prepared_data)
+            cursor.executemany(upsert_query, prepared_data)
             conn.commit()
             print("Batch insert or update of meter connections is successful.")
 
@@ -80,9 +77,29 @@ def etl_smp_data():
             cursor.close()
             conn.close()
 
-        return response_data  # Pass data to the next task if needed
+        return response_data
 
-    create_smp_energy_usage_tables_task >> save_smp_meter_connections()
+    @task()
+    def get_usage_data_for_meter(meter_connections, **kwargs):
+        # get date and meter_id to for usage endpoint
+        date = kwargs['execution_date'].format("DD-MM-YYYY")
+        meter_id = meter_connections["meter_identifier"]
+
+        # Use HttpHook to retrieve usage date for meter on selected date
+        http_hook = HttpHook(http_conn_id='smp_api_conn', method='GET')
+        endpoint = f"/{meter_id}/usage/{date}"
+        response = http_hook.run(endpoint=endpoint)
+
+        # Process and log the response
+        meter_readings = response.json()
+        print(f"Meter readings received from API: {meter_readings}")
+
+        return meter_readings
+
+
+    meter_connections_data = save_smp_meter_connections()
+    create_smp_energy_usage_tables_task >> meter_connections_data
+    get_usage_data_for_meter.expand(meter_connections=meter_connections_data)
 
 
 dag = etl_smp_data()
