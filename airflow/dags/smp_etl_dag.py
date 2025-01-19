@@ -18,7 +18,7 @@ DAG_ID = "postgres_operator_dag"
 
 
 @dag(
-    dag_id="smp_etl_dag_v06",
+    dag_id="smp_etl_dag_v11",
     schedule_interval="@daily",
     start_date=pendulum.datetime(2025, 1, 17, tz="UTC"),
     catchup=False,
@@ -31,27 +31,58 @@ def etl_smp_data():
         conn_id="home_energy_pg_conn"
     )
 
-    @task(task_id="get_meter_connections")
-    def get_meter_connections():
+    @task(task_id="save_smp_meter_connections")
+    def save_smp_meter_connections():
         # Use HttpHook to interact with the connection
         http_hook = HttpHook(http_conn_id='smp_api_conn', method='GET')
         response = http_hook.run()
 
         # Process and log the response
         response_data = response.json()
-        print(f"Meter connections: {response_data}")
-        return response_data[0]  # Pass data to the next task if needed
+        print(f"Meter connections received from API: {response_data}")
 
-    @task()
-    def load_meter_connections_to_pg(data: Dict):
+        insert_query = """
+            INSERT INTO meters (meter_identifier, connection_type, start_date, end_date)
+            VALUES (%s, %s, to_date(%s, 'DD-MM-YYYY'), to_date(%s, 'DD-MM-YYYY'))
+            ON CONFLICT (meter_identifier)
+            DO UPDATE SET 
+                connection_type = EXCLUDED.connection_type,
+                start_date = EXCLUDED.start_date,
+                end_date = EXCLUDED.end_date;
+        """
+
         hook = PostgresHook(postgres_conn_id='home_energy_pg_conn')
+        conn = hook.get_conn()
+        cursor = conn.cursor()
 
-        hook.run(sql="sql/insert_smp_meter_connections.sql", parameters=data)
+        try:
+            # Prepare the data as a list of tuples for batch execution
+            prepared_data = [
+                (
+                    record['meter_identifier'],
+                    record['connection_type'],
+                    record['start_date'],
+                    record['end_date'],
+                )
+                for record in response_data
+            ]
 
+            # Execute the query for all records in the list
+            cursor.executemany(insert_query, prepared_data)
+            conn.commit()
+            print("Batch insert or update of meter connections is successful.")
 
-    create_smp_energy_usage_tables_task >> get_meter_connections()
-    meter_data = get_meter_connections()
-    load_meter_connections_to_pg(data=meter_data)
+        except Exception as e:
+            print(f"An error occurred: {e}")
+            conn.rollback()
+
+        finally:
+            cursor.close()
+            conn.close()
+
+        return response_data  # Pass data to the next task if needed
+
+    create_smp_energy_usage_tables_task >> save_smp_meter_connections()
 
 
 dag = etl_smp_data()
