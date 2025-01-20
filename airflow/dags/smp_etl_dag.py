@@ -9,9 +9,9 @@ from airflow.providers.postgres.hooks.postgres import PostgresHook
 
 
 @dag(
-    dag_id="smp_etl_dag_v18",
+    dag_id="smp_etl_dag_v25",
     schedule_interval="@daily",
-    start_date=pendulum.datetime(2025, 1, 10, tz="UTC"),
+    start_date=pendulum.datetime(2024, 1, 18, tz="UTC"),
     end_date=pendulum.today().subtract(days=1),  # only up until yesterday to avoid empty data retrievals
     catchup=True,
     dagrun_timeout=datetime.timedelta(minutes=60),
@@ -36,7 +36,6 @@ def etl_smp_data():
 
     @task()
     def load_meter_connections_to_pg(meter_connections):
-
         upsert_query = """
             INSERT INTO meters (meter_identifier, connection_type, start_date, end_date)
             VALUES (%s, %s, to_date(%s, 'DD-MM-YYYY'), to_date(%s, 'DD-MM-YYYY'))
@@ -107,7 +106,8 @@ def etl_smp_data():
         for usage in meter_details_and_readings["usages"]:
             mapped_usages = []
             if meter_details_and_readings["connection_type"] == "gas":
-                mapped_usage = {"time": usage["time"],
+                mapped_usage = {"meter_identifier": meter_details_and_readings["meter_identifier"],
+                                "time": usage["time"],
                                 "reading_time_type": None,
                                 "reading_subtype": "delivery",
                                 "value": usage["delivery"],
@@ -121,14 +121,16 @@ def etl_smp_data():
                     is_reading_time_type_high = True
                 else:
                     raise ValueError("None parsing failed...")
-                mapped_usage_delivery = {"time": usage["time"],
+                mapped_usage_delivery = {"meter_identifier": meter_details_and_readings["meter_identifier"],
+                                         "time": usage["time"],
                                          "reading_time_type": "high" if is_reading_time_type_high else "low",
                                          "reading_subtype": "delivery",
                                          "value": usage["delivery_high"] if is_reading_time_type_high else usage[
                                              "delivery_low"],
                                          "cumulative_reading": usage["delivery_reading_combined"],
                                          "temperature": usage["temperature"]}
-                mapped_usage_return = {"time": usage["time"],
+                mapped_usage_return = {"meter_identifier": meter_details_and_readings["meter_identifier"],
+                                       "time": usage["time"],
                                        "reading_time_type": "high" if is_reading_time_type_high else "low",
                                        "reading_subtype": "return",
                                        "value": usage["returned_delivery_high"] if is_reading_time_type_high else usage[
@@ -141,11 +143,77 @@ def etl_smp_data():
             all_mapped_usages += mapped_usages
         return all_mapped_usages
 
+    @task()
+    def load_mapped_usage_entries_to_pg(mapped_usages: List):
+        # Connect to PostgreSQL using PostgresHook
+        postgres_hook = PostgresHook(postgres_conn_id='home_energy_pg_conn')
+        conn = postgres_hook.get_conn()
+        cursor = conn.cursor()
+
+        import itertools
+        # from decimal import Decimal
+        combined_mapped_usages = list(itertools.chain(*mapped_usages))
+        print(combined_mapped_usages)
+        # Define the SQL query for insertion
+        insert_query = """
+                INSERT INTO usage_entries (
+                    meter_identifier, 
+                    time, 
+                    reading_subtype, 
+                    reading_time_type, 
+                    value, 
+                    cumulative_reading, 
+                    temperature
+                )
+                VALUES (%s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (meter_identifier, time, reading_subtype)
+                DO UPDATE SET 
+                    reading_time_type = EXCLUDED.reading_time_type,
+                    value = EXCLUDED.value,
+                    cumulative_reading = EXCLUDED.cumulative_reading,
+                    temperature = EXCLUDED.temperature;
+            """
+
+        try:
+            # Prepare data in the correct format for executemany
+            prepared_data = [
+                (
+                    entry['meter_identifier'],
+                    pendulum.from_format(entry["time"], "DD-MM-YYYY HH:mm:ss Z").to_iso8601_string(),
+                    entry['reading_subtype'],
+                    entry['reading_time_type'],
+                    entry['value'].replace('.', '').replace(',', '.') if entry['value'] is not None else entry['value'],  # fix decimal formatting
+                    entry['cumulative_reading'].replace('.', '').replace(',', '.') if entry['cumulative_reading'] is not None else entry['cumulative_reading'],
+                    entry['temperature'].replace('.', '').replace(',', '.') if entry['temperature'] is not None else entry['temperature']
+                )
+                for entry in combined_mapped_usages
+            ]
+
+            # Use executemany to insert the data in bulk
+            cursor.executemany(insert_query, prepared_data)
+            conn.commit()
+            print("Batch insert successful!")
+
+        except Exception as e:
+            print(f"An error occurred: {e}")
+            conn.rollback()
+
+        finally:
+            cursor.close()
+            conn.close()
+
+        return combined_mapped_usages
+
+
 
     meter_connections_data = get_meter_connections()
-    create_smp_energy_usage_tables_task >> load_meter_connections_to_pg(meter_connections=meter_connections_data)
+    load_meter_connections_to_pg(meter_connections=meter_connections_data) << create_smp_energy_usage_tables_task
     meter_details_and_readings_list = get_usage_data_for_meter.expand(meter_connection_details=meter_connections_data)
-    map_usage_to_data_schema.expand(meter_details_and_readings=meter_details_and_readings_list)
+    mapped_usages_list = map_usage_to_data_schema.expand(meter_details_and_readings=meter_details_and_readings_list)
 
+    # todo: add dependency of last task on meter connections upsert task
+    load_mapped_usage_entries_to_pg(mapped_usages=mapped_usages_list)
+
+    # todo: ensure tasks fail if DB operations raise errors
 
 dag = etl_smp_data()
