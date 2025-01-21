@@ -9,12 +9,16 @@ from airflow.providers.postgres.hooks.postgres import PostgresHook
 
 
 @dag(
-    dag_id="smp_etl_dag_v25",
+    dag_id="smp_etl_dag_v39",
     schedule_interval="@daily",
-    start_date=pendulum.datetime(2024, 1, 18, tz="UTC"),
-    end_date=pendulum.today().subtract(days=1),  # only up until yesterday to avoid empty data retrievals
+    start_date=pendulum.datetime(2022, 7, 29, tz="UTC"),
+    end_date=pendulum.today().subtract(days=2),  # only up until day before yesterday to avoid empty data retrievals
     catchup=True,
     dagrun_timeout=datetime.timedelta(minutes=60),
+    default_args={
+        "retries": 2,  # Retry failed tasks twice
+        "retry_delay": datetime.timedelta(days=1),  # Delay between retries
+    },
 )
 def etl_smp_data():
     create_smp_energy_usage_tables_task = SQLExecuteQueryOperator(
@@ -49,7 +53,6 @@ def etl_smp_data():
         hook = PostgresHook(postgres_conn_id='home_energy_pg_conn')
         conn = hook.get_conn()
         cursor = conn.cursor()
-
         try:
             # Prepare the data as a list of tuples for batch execution
             prepared_data = [
@@ -70,18 +73,18 @@ def etl_smp_data():
         except Exception as e:
             print(f"An error occurred: {e}")
             conn.rollback()
+            raise  # ensure airflow task fails if error occurs
 
         finally:
             cursor.close()
             conn.close()
 
-        return meter_connections
+        return prepared_data
 
     @task()
     def get_usage_data_for_meter(meter_connection_details, **kwargs):
         # get date and meter_id to for usage endpoint
         date = kwargs['execution_date'].format("DD-MM-YYYY")
-        print(date)
         meter_id = meter_connection_details["meter_identifier"]
 
         # Use HttpHook to retrieve usage date for meter on selected date
@@ -91,6 +94,10 @@ def etl_smp_data():
 
         # Process and log the response
         meter_readings = response.json()
+
+        # if no usages found, raise exception to ensure the task fails
+        if not meter_readings["usages"]:
+            raise Exception(f"No usages found for meter {meter_id} on {date}")
 
         # add connection details for downstream processing
         meter_details_and_readings = meter_readings | meter_connection_details
@@ -144,17 +151,48 @@ def etl_smp_data():
         return all_mapped_usages
 
     @task()
-    def load_mapped_usage_entries_to_pg(mapped_usages: List):
+    def clean_mapped_usage_entries(mapped_usages: List):
+        import itertools, pandas as pd
+        pd.set_option('display.max_columns', None)
+        combined = list(itertools.chain(*mapped_usages))
+        df = pd.json_normalize(combined)
+
+        # Ensure 'meter_identifier' is a string
+        df['meter_identifier'] = df['meter_identifier'].astype(str)
+
+        # Convert 'time' to datetime with timezone (if not already in that format)
+        # Handle invalid dates by setting them as NaT by 'coerce'
+        # Raise an error if any missing values are found in the 'time' column
+        if pd.isna(df['time']).any():
+            raise ValueError("Missing values encountered in 'time' column")
+
+        # Ensure 'reading_time_type' is a string, with None where missing
+        df['reading_time_type'] = df['reading_time_type'].where(df['reading_time_type'].isna(),
+                                                                df['reading_time_type'].astype(str))
+        # Ensure 'reading_subtype' is a non-null string as it's part of primary key
+        df['reading_subtype'] = df['reading_subtype'].astype(str, errors='raise')
+
+        # Convert 'value', 'cumulative_reading', 'temperature' to floats, set errors as NaN
+        df['value'] = df['value'].fillna('').str.replace('.', '', regex=False).str.replace(',', '.', regex=False)
+        df['value'] = pd.to_numeric(df['value'], errors='coerce', downcast='float')  # Coerce invalid entries to NaN
+
+        df['cumulative_reading'] = df['cumulative_reading'].fillna('').str.replace('.', '', regex=False).str.replace(',', '.', regex=False)
+        df['cumulative_reading'] = pd.to_numeric(df['cumulative_reading'], errors='coerce', downcast='float')
+
+        df['temperature'] = df['temperature'].fillna('').str.replace('.', '', regex=False).str.replace(',', '.', regex=False)
+        df['temperature'] = pd.to_numeric(df['temperature'], errors='coerce', downcast='float')
+
+        cleaned_usage_entries = df.to_dict(orient='records')
+        return cleaned_usage_entries
+
+    @task()
+    def load_mapped_usage_entries_to_pg(combined_mapped_usages: List):
         # Connect to PostgreSQL using PostgresHook
         postgres_hook = PostgresHook(postgres_conn_id='home_energy_pg_conn')
         conn = postgres_hook.get_conn()
         cursor = conn.cursor()
 
-        import itertools
-        # from decimal import Decimal
-        combined_mapped_usages = list(itertools.chain(*mapped_usages))
-        print(combined_mapped_usages)
-        # Define the SQL query for insertion
+        # Define the SQL query for upsert
         insert_query = """
                 INSERT INTO usage_entries (
                     meter_identifier, 
@@ -182,13 +220,12 @@ def etl_smp_data():
                     pendulum.from_format(entry["time"], "DD-MM-YYYY HH:mm:ss Z").to_iso8601_string(),
                     entry['reading_subtype'],
                     entry['reading_time_type'],
-                    entry['value'].replace('.', '').replace(',', '.') if entry['value'] is not None else entry['value'],  # fix decimal formatting
-                    entry['cumulative_reading'].replace('.', '').replace(',', '.') if entry['cumulative_reading'] is not None else entry['cumulative_reading'],
-                    entry['temperature'].replace('.', '').replace(',', '.') if entry['temperature'] is not None else entry['temperature']
+                    entry['value'],
+                    entry['cumulative_reading'],
+                    entry['temperature'],
                 )
                 for entry in combined_mapped_usages
             ]
-
             # Use executemany to insert the data in bulk
             cursor.executemany(insert_query, prepared_data)
             conn.commit()
@@ -197,6 +234,7 @@ def etl_smp_data():
         except Exception as e:
             print(f"An error occurred: {e}")
             conn.rollback()
+            raise  # ensure airflow task fails if error occurs
 
         finally:
             cursor.close()
@@ -204,16 +242,14 @@ def etl_smp_data():
 
         return combined_mapped_usages
 
-
-
     meter_connections_data = get_meter_connections()
-    load_meter_connections_to_pg(meter_connections=meter_connections_data) << create_smp_energy_usage_tables_task
+    inserted_data = load_meter_connections_to_pg(meter_connections=meter_connections_data)
     meter_details_and_readings_list = get_usage_data_for_meter.expand(meter_connection_details=meter_connections_data)
     mapped_usages_list = map_usage_to_data_schema.expand(meter_details_and_readings=meter_details_and_readings_list)
+    cleaned_combined_usages = clean_mapped_usage_entries(mapped_usages=mapped_usages_list)
+    final_mapped_usages = load_mapped_usage_entries_to_pg(combined_mapped_usages=cleaned_combined_usages)
 
-    # todo: add dependency of last task on meter connections upsert task
-    load_mapped_usage_entries_to_pg(mapped_usages=mapped_usages_list)
-
-    # todo: ensure tasks fail if DB operations raise errors
+    # ensure we load usage entries only after meter connections are in the db, which is preceded by setting up the tables
+    final_mapped_usages << inserted_data << create_smp_energy_usage_tables_task
 
 dag = etl_smp_data()
