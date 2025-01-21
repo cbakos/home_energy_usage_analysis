@@ -95,9 +95,9 @@ def etl_smp_data():
         # Process and log the response
         meter_readings = response.json()
 
-        # if no usages found, raise exception to ensure the task fails
+        # if no usages found, log this
         if not meter_readings["usages"]:
-            raise Exception(f"No usages found for meter {meter_id} on {date}")
+            print(f"No usages found for meter {meter_id} on {date}")
 
         # add connection details for downstream processing
         meter_details_and_readings = meter_readings | meter_connection_details
