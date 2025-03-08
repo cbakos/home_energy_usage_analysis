@@ -9,7 +9,7 @@ from airflow.providers.postgres.hooks.postgres import PostgresHook
 
 
 @dag(
-    dag_id="smp_etl_dag_v39",
+    dag_id="smp_etl_dag_v41",
     schedule_interval="@daily",
     start_date=pendulum.datetime(2022, 7, 29, tz="UTC"),
     end_date=pendulum.today().subtract(days=2),  # only up until day before yesterday to avoid empty data retrievals
@@ -172,8 +172,8 @@ def etl_smp_data():
         # Ensure 'reading_subtype' is a non-null string as it's part of primary key
         df['reading_subtype'] = df['reading_subtype'].astype(str, errors='raise')
 
-        # Convert 'value', 'cumulative_reading', 'temperature' to floats, set errors as NaN
-        df['value'] = df['value'].fillna('').str.replace('.', '', regex=False).str.replace(',', '.', regex=False)
+        # Convert 'value', 'cumulative_reading', 'temperature' to floats, set errors as None i.e. NULL in the DB
+        df['value'] = df['value'].fillna('').str.replace('.', '', regex=False).str.replace(',', '.', regex=False).replace('', None)
         df['value'] = pd.to_numeric(df['value'], errors='coerce', downcast='float')  # Coerce invalid entries to NaN
 
         df['cumulative_reading'] = df['cumulative_reading'].fillna('').str.replace('.', '', regex=False).str.replace(',', '.', regex=False)
